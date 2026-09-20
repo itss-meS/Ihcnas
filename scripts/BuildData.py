@@ -1,208 +1,247 @@
 import os
-import sys
 import json
-import zipfile
+import time
 import argparse
-import tempfile
+from pathlib import Path
+from datetime import datetime, timedelta
+
 import numpy as np
+import requests
 import rasterio
 from rasterio.enums import Resampling
-from rasterio.warp import transform_bounds
-from rasterio.windows import from_bounds
-from scipy.ndimage import gaussian_filter
-from skimage.transform import resize
+from rasterio.io import MemoryFile
 
+TOKEN_URL = "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token"
+CATALOG_URL = "https://sh.dataspace.copernicus.eu/catalog/v1/search"
+PROCESS_URL = "https://sh.dataspace.copernicus.eu/process/v1"
 
-BAND_FILE_SUFFIX = {
-    'B02': '_B02_10m.jp2',
-    'B03': '_B03_10m.jp2',
-    'B04': '_B04_10m.jp2',
-    'B08': '_B08_10m.jp2',
+BANDS = ["B02", "B03", "B04", "B08"]
+
+EVALSCRIPT = """//VERSION=3
+function setup() {
+    return {
+        input: [{ bands: ["B02", "B03", "B04", "B08"], units: "DN" }],
+        output: { bands: 4, sampleType: "UINT16" }
+    };
 }
+function evaluatePixel(sample) {
+    return [sample.B02, sample.B03, sample.B04, sample.B08];
+}
+"""
+
+CLIENT_ID = "CLIENT_ID"
+CLIENT_SECRET = "CLIENT_SECRET_ID"
 
 
-def get_access_token(client_id, client_secret):
-    import requests
-    token_url = 'https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token'
-    resp = requests.post(token_url, data={
-        'client_id': client_id,
-        'client_secret': client_secret,
-        'grant_type': 'client_credentials',
-    })
-    resp.raise_for_status()
-    return resp.json()['access_token']
+class CDSEAuthSession:
+    """Session that automatically refreshes the OAuth token before expiration."""
+
+    def __init__(self, client_id, client_secret):
+        self.client_id = client_id
+        self.client_secret = client_secret
+        self.token = None
+        self.expires_at = 0
+        self.session = requests.Session()
+
+    def get_token(self):
+        if time.time() < self.expires_at - 60:
+            return self.token
+
+        data = {
+            "client_id": self.client_id,
+            "client_secret": self.client_secret,
+            "grant_type": "client_credentials",
+        }
+        res = requests.post(TOKEN_URL, data=data, timeout=30)
+        if res.status_code != 200:
+            raise RuntimeError(f"Token API error {res.status_code}: {res.text[:500]}")
+        payload = res.json()
+        self.token = payload["access_token"]
+        self.expires_at = time.time() + payload.get("expires_in", 600)
+        self.session.headers.update({"Authorization": f"Bearer {self.token}"})
+        return self.token
+
+    def post(self, *args, **kwargs):
+        self.get_token()
+        return self.session.post(*args, **kwargs)
 
 
-def search_product(bbox, start_date, end_date, access_token):
-    import requests
-    polygon = (
-        f'POLYGON(({bbox[0]} {bbox[1]},{bbox[2]} {bbox[1]},'
-        f'{bbox[2]} {bbox[3]},{bbox[0]} {bbox[3]},{bbox[0]} {bbox[1]}))'
-    )
-    search_url = 'https://catalogue.dataspace.copernicus.eu/odata/v1/Products'
-    filter_str = (
-        f"Collection/Name eq 'SENTINEL-2' and "
-        f"OData.CSC.Intersects(area=geography'SRID=4326;{polygon}') and "
-        f"ContentDate/Start gt {start_date}T00:00:00.000Z and "
-        f"ContentDate/Start lt {end_date}T00:00:00.000Z and "
-        f"Attributes/OData.CSC.StringAttribute/any(att:att/Name eq 'productType' "
-        f"and att/OData.CSC.StringAttribute/Value eq 'S2MSI2A')"
-    )
-    params = {'$filter': filter_str, '$top': 1, '$orderby': 'ContentDate/Start desc'}
-    resp = requests.get(search_url, params=params, headers={'Authorization': f'Bearer {access_token}'})
-    resp.raise_for_status()
-    results = resp.json().get('value', [])
-    if not results:
-        return None
-    return results[0]
-
-
-def download_product_zip(product_id, access_token, dest_path):
-    import requests
-    download_url = f'https://zipper.dataspace.copernicus.eu/odata/v1/Products({product_id})/$value'
-    with requests.get(download_url, headers={'Authorization': f'Bearer {access_token}'}, stream=True) as r:
-        if r.status_code != 200:
-            print(f'download failed with status {r.status_code}: {r.text[:500]}')
-        r.raise_for_status()
-        with open(dest_path, 'wb') as f:
-            for chunk in r.iter_content(chunk_size=1 << 20):
-                f.write(chunk)
-
-
-def find_band_paths(extract_dir):
-    band_paths = {}
-    for root, _, files in os.walk(extract_dir):
-        for fname in files:
-            for band, suffix in BAND_FILE_SUFFIX.items():
-                if fname.endswith(suffix):
-                    band_paths[band] = os.path.join(root, fname)
-    return band_paths
-
-
-def crop_bands_to_array(band_paths, bbox, out_size):
-    arrays = []
-    transform_out = None
-    crs_out = None
-    for band in ['B02', 'B03', 'B04', 'B08']:
-        with rasterio.open(band_paths[band]) as src:
-            crs_out = src.crs
-            window_bbox = transform_bounds('EPSG:4326', src.crs, *bbox)
-            window = from_bounds(*window_bbox, transform=src.transform)
-            data = src.read(
-                1,
-                window=window,
-                out_shape=(out_size, out_size),
-                resampling=Resampling.bilinear,
-            )
-            if transform_out is None:
-                base_transform = src.window_transform(window)
-                scale_x = window.width / out_size
-                scale_y = window.height / out_size
-                transform_out = base_transform * base_transform.scale(scale_x, scale_y)
-            arrays.append(data)
-    stacked = np.stack(arrays, axis=0)
-    return stacked, transform_out, crs_out
-
-
-def degrade_to_lr(gt_patch, lr_size, blur_sigma=0.8, noise_std=0.003):
-    C, H, W = gt_patch.shape
-    lr = np.zeros((C, lr_size, lr_size), dtype=np.float32)
-    for c in range(C):
-        band = gaussian_filter(gt_patch[c], sigma=blur_sigma)
-        band = resize(band, (lr_size, lr_size), order=3, anti_aliasing=True, preserve_range=True)
-        lr[c] = band
-    if noise_std > 0:
-        lr = lr + np.random.normal(0.0, noise_std, size=lr.shape).astype(np.float32)
-    return np.clip(lr, 0.0, 1.0)
-
-
-def write_tif(path, arr, transform, crs):
-    profile = {
-        'driver': 'GTiff',
-        'height': arr.shape[1],
-        'width': arr.shape[2],
-        'count': arr.shape[0],
-        'dtype': 'float32',
-        'crs': crs,
-        'transform': transform,
+def search_best_scene(auth, aoi):
+    west, south, east, north = aoi["bbox"]
+    body = {
+        "collections": ["sentinel-2-l2a"],
+        "bbox": [west, south, east, north],
+        "datetime": f'{aoi["start_date"]}T00:00:00Z/{aoi["end_date"]}T23:59:59Z',
+        "limit": 100,
     }
-    with rasterio.open(path, 'w', **profile) as dst:
-        for i in range(arr.shape[0]):
-            dst.write(arr[i].astype('float32'), i + 1)
+    response = auth.post(CATALOG_URL, json=body, timeout=120)
+    if response.status_code != 200:
+        raise RuntimeError(f"Catalog API error {response.status_code}: {response.text[:500]}")
+
+    features = response.json().get("features", [])
+    if not features:
+        raise RuntimeError("No Sentinel-2 L2A scene found in this date range.")
+
+    def get_cloud(f):
+        val = f.get("properties", {}).get("eo:cloud_cover")
+        return float(val) if val is not None else 100.0
+
+    # Sort strictly by cloud coverage and pick the clearest
+    best = min(features, key=get_cloud)
+    return best
+
+
+def download_gt(auth, aoi, scene, out_path, gt_size):
+    west, south, east, north = aoi["bbox"]
+    gt_h, gt_w = gt_size
+
+    # Target the single best day discovered by search_best_scene
+    scene_datetime = scene["properties"]["datetime"]
+    date_str = scene_datetime.split("T")[0]
+    time_from = f"{date_str}T00:00:00Z"
+    time_to = f"{date_str}T23:59:59Z"
+
+    body = {
+        "input": {
+            "bounds": {
+                "bbox": [west, south, east, north],
+                "properties": {"crs": "http://www.opengis.net/def/crs/OGC/1.3/CRS84"},
+            },
+            "data": [{
+                "type": "sentinel-2-l2a",
+                "dataFilter": {
+                    "timeRange": {"from": time_from, "to": time_to},
+                    "mosaickingOrder": "mostRecent"
+                },
+            }],
+        },
+        "output": {
+            "width": gt_w,
+            "height": gt_h,
+            "responses": [{"identifier": "default", "format": {"type": "image/tiff"}}],
+        },
+        "evalscript": EVALSCRIPT,
+    }
+
+    response = auth.post(
+        PROCESS_URL,
+        headers={"Content-Type": "application/json", "Accept": "image/tiff"},
+        json=body,
+        timeout=300,
+    )
+    if response.status_code != 200:
+        raise RuntimeError(f"Process API error {response.status_code}: {response.text[:500]}")
+
+    with MemoryFile(response.content) as memfile:
+        with memfile.open() as src:
+            arr = src.read()
+            transform = src.transform
+            crs = src.crs
+
+    # Verification: check if output is truly blank/nodata (all zeros)
+    if np.all(arr == 0):
+        raise RuntimeError("API returned completely empty (zero-filled) raster.")
+
+    arr = arr[:4].astype(np.uint16, copy=False)
+
+    profile = {
+        "driver": "GTiff", "height": arr.shape[1], "width": arr.shape[2],
+        "count": 4, "dtype": "uint16", "crs": crs, "transform": transform,
+        "compress": "deflate", "tiled": True,
+    }
+    with rasterio.open(out_path, "w", **profile) as dst:
+        for i in range(4):
+            dst.write(arr[i], i + 1)
+            dst.set_band_description(i + 1, BANDS[i])
+
+    # Save an 8-bit visual check preview (RGB stretched)
+    save_rgb_preview(arr, out_path.with_suffix(".png"))
+
+
+def save_rgb_preview(arr_uint16, preview_path):
+    """Saves an 8-bit RGB preview with reflectance visual stretch."""
+    from PIL import Image
+    # Band order in your arr: 0: B02 (Blue), 1: B03 (Green), 2: B04 (Red)
+    rgb = np.stack([arr_uint16[2], arr_uint16[1], arr_uint16[0]], axis=-1).astype(np.float32)
+
+    # 2.5x visual stretch on 0-10000 surface reflectance
+    rgb = np.clip((rgb / 10000.0) * 2.5 * 255.0, 0, 255).astype(np.uint8)
+    Image.fromarray(rgb).save(preview_path)
+
+
+def make_lr(gt_path, lr_path, lr_size):
+    out_h, out_w = lr_size
+    with rasterio.open(gt_path) as src:
+        profile = src.profile.copy()
+        profile.update(height=out_h, width=out_w)
+        profile["transform"] = src.transform * src.transform.scale(
+            src.width / out_w, src.height / out_h
+        )
+        with rasterio.open(lr_path, "w", **profile) as dst:
+            for i in range(1, 5):
+                # Use bilinear or average to avoid negative underflow artifacts
+                data = src.read(i, out_shape=(out_h, out_w), resampling=Resampling.bilinear)
+                dst.write(data, i)
+                dst.set_band_description(i, BANDS[i - 1])
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--aoi_config', type=str, required=True)
-    parser.add_argument('--output_root', type=str, default='dataset')
-    parser.add_argument('--gt_size', type=int, default=256)
-    parser.add_argument('--lr_size', type=int, default=64)
-    parser.add_argument('--limit', type=int, default=0)
+    parser.add_argument("--aoi_config", type=str, required=True)
+    parser.add_argument("--output_root", type=str, default=".")
+    parser.add_argument("--gt_size", type=int, nargs=2, default=[256, 256])
+    parser.add_argument("--lr_size", type=int, nargs=2, default=[64, 64])
     args = parser.parse_args()
 
-    gt_dir = os.path.join(args.output_root, 'tiff_gt')
-    lr_dir = os.path.join(args.output_root, 'tiff_lr')
-    os.makedirs(gt_dir, exist_ok=True)
-    os.makedirs(lr_dir, exist_ok=True)
+    root = Path(args.output_root).resolve()
+    config_path = Path(args.aoi_config).resolve()
+    gt_dir = root / "tiff_GT"
+    lr_dir = root / "tiff_LR"
+    failed_path = root / "configs" / "failed_aois.json"
 
-    with open(args.aoi_config, 'r') as f:
+    gt_dir.mkdir(parents=True, exist_ok=True)
+    lr_dir.mkdir(parents=True, exist_ok=True)
+
+    with open(config_path, "r", encoding="utf-8") as f:
         aois = json.load(f)
-    if args.limit > 0:
-        aois = aois[:args.limit]
 
-    client_id = os.environ.get('CDSE_CLIENT_ID')
-    client_secret = os.environ.get('CDSE_CLIENT_SECRET')
-    if not client_id or not client_secret:
-        print('CDSE_CLIENT_ID / CDSE_CLIENT_SECRET environment variables are required')
-        sys.exit(1)
+    auth = CDSEAuthSession(CLIENT_ID, CLIENT_SECRET)
 
-    access_token = get_access_token(client_id, client_secret)
+    processed = 0
+    failed = []
 
-    done = 0
-    for entry in aois:
-        name = entry['name']
-        bbox = entry['bbox']
-        start_date = entry.get('start_date', '2024-06-01')
-        end_date = entry.get('end_date', '2024-09-30')
+    for index, aoi in enumerate(aois, start=1):
+        name = aoi["name"]
+        gt_path = gt_dir / f"{name}.tif"
+        lr_path = lr_dir / f"{name}.tif"
 
-        gt_path = os.path.join(gt_dir, f'{name}.tif')
-        lr_path = os.path.join(lr_dir, f'{name}.tif')
-        if os.path.exists(gt_path) and os.path.exists(lr_path):
-            print(f'{name}: already exists, skipping')
+        if gt_path.exists() and lr_path.exists():
+            print(f"[{index}/{len(aois)}] {name}: already exists, skipping")
             continue
 
-        access_token = get_access_token(client_id, client_secret)
-        product = search_product(bbox, start_date, end_date, access_token)
-        if product is None:
-            print(f'{name}: no scene found, skipping')
-            continue
+        print(f"[{index}/{len(aois)}] {name}")
+        try:
+            best_scene = search_best_scene(auth, aoi)
+            scene_dt = best_scene["properties"]["datetime"]
+            cloud = best_scene["properties"].get("eo:cloud_cover", "unknown")
+            print(f"  Best scene found: {scene_dt} (cloud: {cloud}%)")
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            zip_path = os.path.join(tmp_dir, 'product.zip')
-            fresh_token = get_access_token(client_id, client_secret)
-            download_product_zip(product['Id'], fresh_token, zip_path)
-            with zipfile.ZipFile(zip_path, 'r') as zf:
-                zf.extractall(tmp_dir)
+            download_gt(auth, aoi, best_scene, gt_path, tuple(args.gt_size))
+            make_lr(gt_path, lr_path, tuple(args.lr_size))
+            print(f"  Saved {gt_path.name} and {lr_path.name}")
+            processed += 1
+        except Exception as exc:
+            print(f"  FAILED: {exc}")
+            if gt_path.exists():
+                gt_path.unlink()
+            if lr_path.exists():
+                lr_path.unlink()
+            failed.append({"name": name, "error": str(exc)})
 
-            band_paths = find_band_paths(tmp_dir)
-            if len(band_paths) < 4:
-                print(f'{name}: could not locate all 4 bands, skipping')
-                continue
-
-            gt_arr, transform, crs = crop_bands_to_array(band_paths, bbox, args.gt_size)
-            gt_arr = np.clip(gt_arr.astype(np.float32) / 10000.0, 0.0, 1.0)
-
-            lr_arr = degrade_to_lr(gt_arr, args.lr_size)
-            lr_transform = transform * transform.scale(args.gt_size / args.lr_size, args.gt_size / args.lr_size)
-
-            write_tif(gt_path, gt_arr, transform, crs)
-            write_tif(lr_path, lr_arr, lr_transform, crs)
-
-        done += 1
-        print(f'{name}: wrote {gt_path} and {lr_path} ({done}/{len(aois)})')
-
-    print(f'completed {done} AOIs')
+    failed_path.parent.mkdir(parents=True, exist_ok=True)
+    failed_path.write_text(json.dumps(failed, indent=2), encoding="utf-8")
+    print(f"Done! Processed: {processed}/{len(aois)}, Failed: {len(failed)}")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
