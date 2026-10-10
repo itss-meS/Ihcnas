@@ -17,6 +17,7 @@ hidden_dim: 128
 flow_depth: 6
 num_euler_steps: 5
 ensemble_size: 3
+ndvi_loss_weight: 0.2
 num_epochs: 50
 val_fraction: 0.1
 seed: 42

@@ -64,6 +64,7 @@ class Trainer:
             flow_depth=cfg.get('flow_depth', 6),
             hat_depth=cfg.get('hat_depth', 4),
             scale_factor=cfg.get('scale_factor', 4),
+            ndvi_loss_weight=cfg.get('ndvi_loss_weight', 0.2),
         ).to(self.device)
 
         init_path = cfg.get('init_from_checkpoint', None) or cfg.get('init_from_stage1', None)

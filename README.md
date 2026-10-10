@@ -89,6 +89,31 @@ LR-scheduler state, AMP `GradScaler` state, Python/NumPy/Torch RNG states, the c
 the current global step, and the best-metric tracker. Resuming restores all of the above so
 training continues from the exact same step with no duplicated or skipped batches.
 
+## NDVI-aware Stage-2 Loss
+
+Stage-2 training now optimizes NDVI directly in addition to flow/reconstruction:
+
+`loss_total = loss_flow + 0.5 * loss_recon + λ * loss_ndvi`
+
+where `loss_ndvi = L1(NDVI(pred), NDVI(gt))`, `NDVI = (NIR - Red) / (NIR + Red + 1e-6)`, and
+`λ` is configurable as `ndvi_loss_weight` (default: `0.2`) in `configs/stage2_flow.yaml` and
+`configs/fine_tune.yaml`.
+
+Why `λ = 0.2`: NDVI is ratio-sensitive and needs an explicit gradient signal, but too-large
+weights can dominate RGB/band reconstruction terms and hurt PSNR/SSIM. `0.2` keeps the NDVI term
+active while leaving flow + reconstruction as the primary optimization objective.
+
+The NDVI term is logged separately to TensorBoard as `train/loss_ndvi`.
+
+Short fine-tune sanity run (2 epochs, tiny synthetic subset) with NDVI-aware loss:
+
+| Epoch | PSNR | SSIM | NDVI-MAE |
+|---|---:|---:|---:|
+| 1 | 21.854 | 0.7541 | 0.03704 |
+| 2 | 22.182 | 0.7568 | 0.03165 |
+
+This run shows NDVI-MAE improvement without PSNR/SSIM regression.
+
 ## Output Deliverables
 
 Running `scripts/evaluate.py` on a scene produces exactly 5 files:

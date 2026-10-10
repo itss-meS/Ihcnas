@@ -15,6 +15,8 @@ def test_forward_train_shapes():
     assert loss.dim() == 0
     assert 'loss_flow' in loss_dict
     assert 'loss_recon' in loss_dict
+    assert 'loss_ndvi' in loss_dict
+    assert torch.isfinite(loss_dict['loss_ndvi'])
 
 
 def test_infer_shapes():
