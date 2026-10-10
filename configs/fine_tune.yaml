@@ -16,6 +16,7 @@ flow_depth: 6
 hat_depth: 4
 num_euler_steps: 5
 ensemble_size: 3
+ndvi_loss_weight: 0.2  # keeps NDVI signal explicit without overpowering reconstruction/perceptual fidelity
 num_epochs: 30
 val_fraction: 0.15
 seed: 42

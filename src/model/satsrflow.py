@@ -30,18 +30,25 @@ class GTLatentEncoder(nn.Module):
 
 class SatSRFlow(nn.Module):
     def __init__(self, in_ch=4, out_ch=4, latent_dim=64, cond_dim=128, hidden_dim=128,
-                 embed_dim=128, flow_depth=6, hat_depth=4, window_size=8, scale_factor=4):
+                 embed_dim=128, flow_depth=6, hat_depth=4, window_size=8, scale_factor=4,
+                 ndvi_loss_weight=0.2):
         super().__init__()
         self.in_ch = in_ch
         self.out_ch = out_ch
         self.latent_dim = latent_dim
         self.scale_factor = scale_factor
+        self.ndvi_loss_weight = ndvi_loss_weight
 
         self.hat_encoder = HATEncoder(in_ch, embed_dim, cond_dim, hat_depth, num_heads=4, window_size=window_size)
         self.feat_to_latent = nn.Conv2d(embed_dim, latent_dim, kernel_size=1)
         self.gt_latent_encoder = GTLatentEncoder(in_ch, latent_dim, scale_factor)
         self.flow_backbone = RectifiedFlowBackbone(latent_dim, cond_dim, flow_depth)
         self.liif_decoder = LIIFDecoder(latent_dim, out_ch, hidden_dim)
+
+    def ndvi(self, bands_4, eps=1e-6):
+        red = bands_4[:, 2:3, :, :]
+        nir = bands_4[:, 3:4, :, :]
+        return (nir - red) / (nir + red + eps)
 
     def bicubic_base(self, lr_img, target_shape):
         return F.interpolate(lr_img, size=target_shape, mode='bicubic', align_corners=False)
@@ -80,11 +87,13 @@ class SatSRFlow(nn.Module):
         pred_hr = torch.clamp(base + liif_residual, 0.0, 1.0)
 
         loss_recon = charbonnier_loss(pred_hr, hr_gt)
-        total_loss = loss_flow + 0.5 * loss_recon
+        loss_ndvi = F.l1_loss(self.ndvi(pred_hr), self.ndvi(hr_gt))
+        total_loss = loss_flow + 0.5 * loss_recon + self.ndvi_loss_weight * loss_ndvi
 
         loss_dict = {
             'loss_flow': loss_flow.detach(),
             'loss_recon': loss_recon.detach(),
+            'loss_ndvi': loss_ndvi.detach(),
             'loss_total': total_loss.detach(),
         }
         return total_loss, loss_dict
