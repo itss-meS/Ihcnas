@@ -29,9 +29,26 @@ def build_model(cfg, device):
 
 
 def save_visual_preview(lr_img, sr_img, output_path):
+    def enhance_for_display(rgb, gamma=1.2):
+        """
+        Display-only contrast stretch + gamma correction.
+        Does NOT affect saved .tif outputs or metrics.
+        """
+        enhanced = np.copy(rgb)
+        for i in range(3):
+            band = enhanced[i, :, :]
+            lo = np.percentile(band, 2)
+            hi = np.percentile(band, 98)
+            band = np.clip((band - lo) / (hi - lo + 1e-6), 0.0, 1.0)
+            band = band ** (1.0 / gamma)
+            enhanced[i, :, :] = band
+        return enhanced
+
     def to_uint8_rgb(arr):
         rgb = arr[[2, 1, 0], :, :]
         rgb = np.clip(rgb, 0.0, 1.0)
+        # Display-only enhancement
+        rgb = enhance_for_display(rgb, gamma=1.2)
         rgb = (rgb * 255.0).astype(np.uint8)
         return np.transpose(rgb, (1, 2, 0))
 
