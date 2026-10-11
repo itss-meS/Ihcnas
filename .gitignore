@@ -85,3 +85,8 @@ logs/
 *.json
 output/
 results/
+!results/
+!results/ood_baseline_matrix.md
+!results/ood_baseline_matrix.csv
+!results/ood_per_image_metrics.csv
+!results/ood_metadata.json

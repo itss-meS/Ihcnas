@@ -128,6 +128,63 @@ Running `scripts/evaluate.py` on a scene produces exactly 5 files:
 
 Target reference thresholds: PSNR > 32 dB, SSIM > 0.88, SAM < 2.8°, ERGAS < 2.5, NDVI-MAE < 0.025.
 
+## Reproducible OOD Evaluation (Issue #4 Deliverable)
+
+`scripts/evaluate_ood.py` evaluates bicubic and (optionally) IHCNAS on:
+
+- **Synthetic OOD blur matrix** from the same held-out `dataset/test/GT` set using Gaussian blur sigmas `0.4 0.8 2.0` before 4× downsampling.
+- **Fixed test LR** already present in `dataset/test/LR`, reported separately as `fixed_test_lr` (not assumed to match those sigmas).
+
+Dependencies:
+
+- Core deps from `requirements.txt`
+- `lpips` for LPIPS metric (`pip install lpips`) unless `--disable_lpips` is passed
+
+Protocol details:
+
+- Arrays are treated as reflectance in `[0,1]` with band order `[B02,B03,B04,B08]`.
+- PSNR/SSIM are computed on **all 4 bands**.
+- LPIPS is RGB-only and uses `[B04,B03,B02]` = indices `[2,1,0]`, mapped to `[-1,1]`.
+- LR is always bicubic-upsampled to GT size before metric computation (no native-LR-vs-GT comparison).
+- Synthetic degradation is deterministic and documented in output metadata (`ood_metadata.json`).
+
+Example commands:
+
+```bash
+python scripts/evaluate_ood.py \
+  --data_root dataset \
+  --output_dir results \
+  --blur_sigmas 0.4 0.8 2.0 \
+  --scale_factor 4 \
+  --device auto \
+  --num_steps 5 \
+  --ensemble_size 3 \
+  --seed 42 \
+  --disable_lpips \
+  --force
+```
+
+```bash
+python scripts/evaluate_ood.py \
+  --data_root dataset \
+  --checkpoint checkpoints/stage2_flow/last.ckpt \
+  --output_dir results \
+  --blur_sigmas 0.4 0.8 2.0 \
+  --scale_factor 4 \
+  --device auto \
+  --num_steps 5 \
+  --ensemble_size 3 \
+  --seed 42 \
+  --force
+```
+
+Outputs written to `--output_dir`:
+
+- `ood_per_image_metrics.csv`
+- `ood_baseline_matrix.csv`
+- `ood_baseline_matrix.md`
+- `ood_metadata.json`
+
 ## Benchmark Comparison
 
 | Metric / Dimension | Bicubic Baseline | ESRGAN / SwinIR (GAN) | Standard Diffusion (SR3/DDPM) | ihcnaS: HAT + Rectified Flow + LIIF |

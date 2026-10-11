@@ -1,0 +1,43 @@
+{
+  "timestamp_utc": "2026-10-11T12:45:24.052003+00:00",
+  "settings": {
+    "data_root": "/home/runner/work/Ihcnas/Ihcnas/dataset",
+    "blur_sigmas": [
+      0.4,
+      0.8,
+      2.0
+    ],
+    "scale_factor": 4,
+    "checkpoint": null,
+    "device_requested": "auto",
+    "device_resolved": "cpu",
+    "num_steps": 5,
+    "ensemble_size": 3,
+    "max_images": null,
+    "disable_lpips": true,
+    "force": true,
+    "deterministic_degradation": {
+      "gaussian_filter_mode": "reflect",
+      "resize_order": 3,
+      "resize_mode": "reflect",
+      "anti_aliasing": true,
+      "preserve_range": true,
+      "clip_to_0_1": true
+    },
+    "lpips_rgb_mapping": "B04,B03,B02 from indices [2,1,0] scaled to [-1,1]",
+    "range_notes": "Dataset arrays are treated as reflectance in [0,1].",
+    "fixed_lr_notes": "fixed_test_lr condition uses existing dataset/test/LR files and is separate from sigma rows."
+  },
+  "counts": {
+    "gt_files": 0,
+    "fixed_pairs": 0,
+    "per_image_rows": 0,
+    "aggregate_rows": 8
+  },
+  "paths": {
+    "per_image_csv": "/home/runner/work/Ihcnas/Ihcnas/results/ood_per_image_metrics.csv",
+    "matrix_csv": "/home/runner/work/Ihcnas/Ihcnas/results/ood_baseline_matrix.csv",
+    "matrix_md": "/home/runner/work/Ihcnas/Ihcnas/results/ood_baseline_matrix.md",
+    "meta_json": "/home/runner/work/Ihcnas/Ihcnas/results/ood_metadata.json"
+  }
+}
