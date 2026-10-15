@@ -9,11 +9,8 @@ from rasterio.io import MemoryFile
 from scipy.ndimage import gaussian_filter
 from skimage.transform import resize
 
-CDSE_CLIENT_ID = "sh-664a8c40-bb9b-41a9-b4ab-26512350d3ee"
-CDSE_CLIENT_SECRET = "pHul4nZB3REURPGRQG0TaGCvHcDyjoF1"
-
-
-
+CDSE_CLIENT_ID = os.environ.get("CDSE_CLIENT_ID")
+CDSE_CLIENT_SECRET = os.environ.get("CDSE_CLIENT_SECRET")
 
 def get_access_token(client_id, client_secret):
     token_url = 'https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token'
@@ -140,11 +137,12 @@ def main():
         aois = json.load(f)
     if args.limit > 0:
         aois = aois[:args.limit]
-
-    if not CDSE_CLIENT_ID or CDSE_CLIENT_ID == "your_client_id_here":
-        print('Please set your CDSE_CLIENT_ID and CDSE_CLIENT_SECRET directly at the top of the script.')
-        sys.exit(1)
-
+if not CDSE_CLIENT_ID or not CDSE_CLIENT_SECRET:
+    print(
+        "Please set both CDSE_CLIENT_ID and CDSE_CLIENT_SECRET "
+        "as environment variables."
+    )
+    sys.exit(1)
     print("Authenticating via Client Credentials...")
     access_token = get_access_token(CDSE_CLIENT_ID, CDSE_CLIENT_SECRET)
 
